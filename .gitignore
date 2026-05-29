@@ -1,0 +1,35 @@
+# Kiwi 厂区监控系统
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+
+# 编译产物
+.pio/
+.pioenvs/
+*.elf
+*.hex
+*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 平台
+.DS_Store
+Thumbs.db
+
+# 数据目录（运行时数据，不上传）
+grafana-fresh/
+mosquitto/
+pgdata/
+
+# 敏感信息
+*.env
+.env.*
