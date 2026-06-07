@@ -21,20 +21,45 @@ MQTT_PORT = 1883
 
 # ─── 虚拟设备 ───
 DEVICES = [
-    {"id": 1, "name": "冷库1号", "sensors": ["temperature", "humidity"],
-     "temp_range": (-25, -18), "humidity_range": (55, 75), "battery": 3.85},
-    {"id": 2, "name": "冷库2号", "sensors": ["temperature", "humidity"],
-     "temp_range": (-24, -17), "humidity_range": (50, 70), "battery": 3.72},
-    {"id": 3, "name": "冷库3号", "sensors": ["temperature", "humidity"],
-     "temp_range": (-26, -19), "humidity_range": (60, 80), "battery": 3.91},
-    {"id": 10, "name": "水箱1号", "sensors": ["water_level"],
+    # ===== 模拟量 =====
+    {"id": 1, "name": "冷库1号温度", "sensors": ["temperature"],
+     "temp_range": (-25, -18), "battery": 3.85},
+    {"id": 2, "name": "冷库2号温度", "sensors": ["temperature"],
+     "temp_range": (-24, -17), "battery": 3.72},
+    {"id": 3, "name": "冷库3号温度", "sensors": ["temperature"],
+     "temp_range": (-26, -19), "battery": 3.91},
+    {"id": 4, "name": "冷库1号湿度", "sensors": ["humidity"],
+     "humidity_range": (55, 75), "battery": 3.85},
+    {"id": 5, "name": "冷库2号湿度", "sensors": ["humidity"],
+     "humidity_range": (50, 70), "battery": 3.72},
+    {"id": 6, "name": "冷库3号湿度", "sensors": ["humidity"],
+     "humidity_range": (60, 80), "battery": 3.91},
+    {"id": 10, "name": "水箱1号水位", "sensors": ["water_level"],
      "water_range": (600, 1500), "battery": 3.78},
-    {"id": 11, "name": "水箱2号", "sensors": ["water_level"],
+    {"id": 11, "name": "水箱2号水位", "sensors": ["water_level"],
      "water_range": (400, 1200), "battery": 3.65},
-    {"id": 20, "name": "车间温湿度", "sensors": ["temperature", "humidity"],
-     "temp_range": (15, 30), "humidity_range": (40, 65), "battery": 3.95},
-    {"id": 21, "name": "宿舍温湿度", "sensors": ["temperature", "humidity"],
-     "temp_range": (18, 28), "humidity_range": (45, 70), "battery": 3.88},
+    {"id": 20, "name": "车间温度", "sensors": ["temperature"],
+     "temp_range": (15, 30), "battery": 3.95},
+    {"id": 21, "name": "车间湿度", "sensors": ["humidity"],
+     "humidity_range": (40, 65), "battery": 3.95},
+
+    # ===== 开关量 / 状态量 =====
+    {"id": 30, "name": "冷库1号门", "sensors": ["switch"],
+     "switch_on_chance": 0.05, "battery": 3.80},
+    {"id": 31, "name": "冷库2号门", "sensors": ["switch"],
+     "switch_on_chance": 0.05, "battery": 3.75},
+    {"id": 32, "name": "冷库3号门", "sensors": ["switch"],
+     "switch_on_chance": 0.05, "battery": 3.82},
+    {"id": 40, "name": "冷库1号压缩机", "sensors": ["status"],
+     "status_on_chance": 0.90, "battery": 3.85},
+    {"id": 41, "name": "冷库2号压缩机", "sensors": ["status"],
+     "status_on_chance": 0.90, "battery": 3.78},
+    {"id": 42, "name": "冷库3号压缩机", "sensors": ["status"],
+     "status_on_chance": 0.90, "battery": 3.88},
+    {"id": 50, "name": "水箱1号泵", "sensors": ["status"],
+     "status_on_chance": 0.30, "battery": 3.70},
+    {"id": 51, "name": "水箱2号泵", "sensors": ["status"],
+     "status_on_chance": 0.30, "battery": 3.68},
 ]
 
 # ─── 全局状态 ───
@@ -67,6 +92,26 @@ def gen_sensor_data(device):
         elif stype == "water_level":
             wmin, wmax = device["water_range"]
             sensors.append({"type": "water_level", "value": round(random.uniform(wmin, wmax)), "unit": "mm"})
+        elif stype == "door":
+            # 门开关: 0=关闭, 1=打开 (偶尔开门)
+            val = 1 if random.random() < device.get("door_open_chance", 0.05) else 0
+            sensors.append({"type": "door", "value": val, "unit": ""})
+        elif stype == "compressor":
+            # 压缩机: 0=停机, 1=运行 (大部分时间运行)
+            val = 0 if random.random() < device.get("compressor_off_chance", 0.1) else 1
+            sensors.append({"type": "compressor", "value": val, "unit": ""})
+        elif stype == "pump":
+            # 水泵: 0=停机, 1=运行
+            val = 1 if random.random() < device.get("pump_on_chance", 0.3) else 0
+            sensors.append({"type": "pump", "value": val, "unit": ""})
+        elif stype == "switch":
+            # 通用开关量: 0=断开, 1=闭合
+            val = 1 if random.random() < device.get("switch_on_chance", 0.05) else 0
+            sensors.append({"type": "switch", "value": val, "unit": ""})
+        elif stype == "status":
+            # 通用状态量: 0=停机/关, 1=运行/开
+            val = 1 if random.random() < device.get("status_on_chance", 0.5) else 0
+            sensors.append({"type": "status", "value": val, "unit": ""})
 
     return {
         "device_id": device["id"],
@@ -248,7 +293,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="stats">
   <div class="stat"><div class="label">当前轮次</div><div class="value" id="round">0</div></div>
   <div class="stat"><div class="label">累计发送</div><div class="value" id="total">0</div></div>
-  <div class="stat"><div class="label">模拟设备</div><div class="value">7</div></div>
+  <div class="stat"><div class="label">模拟设备</div><div class="value">18</div></div>
 </div>
 
 <div class="log-container">
