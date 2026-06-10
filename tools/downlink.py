@@ -13,7 +13,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
+MQTT_PORT = 1884
 CMD_TOPIC = "monitor/cmd/+"
 
 DB_HOST = "localhost"

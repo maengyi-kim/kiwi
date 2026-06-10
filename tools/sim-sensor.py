@@ -14,7 +14,7 @@ from datetime import datetime
 # ─── 使用项目 venv 的 paho-mqtt ───
 VENV_PYTHON = os.path.expanduser("~/monitor/venv/bin/python")
 MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
+MQTT_PORT = 1884
 
 # ─── 虚拟设备定义 ───
 DEVICES = [
