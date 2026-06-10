@@ -585,6 +585,10 @@ async function poll() {
     }
     document.getElementById('gw-table').innerHTML = gwHtml;
 
+    // Gateway name lookup for node table
+    const gwMap = {};
+    for (const g of d.gateways) gwMap[g.id] = g.name;
+
     // Node table
     let nodeHtml = '<tr><th>ID</th><th>名称</th><th>类型</th><th>网关</th><th>间隔</th><th>上报</th><th>电池</th><th>状态</th><th>操作</th></tr>';
     for (const n of d.nodes) {
@@ -594,7 +598,7 @@ async function poll() {
       nodeHtml += `<tr>
         <td>${n.id}</td><td>📟 ${n.name}</td>
         <td><span class="tag ${TYPE_TAG[n.sensor_type]||''}">${TYPE_LABEL[n.sensor_type]||n.sensor_type}</span></td>
-        <td>GW${n.gateway_id}</td><td>${n.interval}s</td><td>${n.count}</td>
+        <td>${gwMap[n.gateway_id] || 'GW'+n.gateway_id}</td><td>${n.interval}s</td><td>${n.count}</td>
         <td>🔋${n.battery}V</td><td>${dot}</td>
         <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="nodeDelete(${n.id})">🗑</button></td>
       </tr>`;
