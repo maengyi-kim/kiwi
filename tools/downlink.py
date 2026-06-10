@@ -46,13 +46,8 @@ def get_all_devices():
         devices = []
         for row in rows:
             did, name, stypes_str, last_seen, ago_s = row
-            # 解析 sensor_types JSON
-            try:
-                stypes = json.loads(stypes_str) if isinstance(stypes_str, str) else (stypes_str or [])
-            except:
-                stypes = []
 
-            # 查最新传感器值
+            # 查最新传感器值 → 从 sensor_data 推导类型
             states = {}
             try:
                 db2 = get_db()
@@ -67,6 +62,8 @@ def get_all_devices():
                 db2.close()
             except:
                 pass
+
+            stypes = sorted(states.keys())  # 从实际数据推导
 
             online = ago_s < 600  # 10分钟内活跃=在线
 
