@@ -205,6 +205,9 @@ th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase}
 .tag-water{background:#1b7c83;color:#a5f0f5}
 .tag-switch{background:#9a6700;color:#f0c97b}
 .tag-status{background:#6e40c9;color:#d2a8ff}
+.tag-comp{background:#8250df;color:#d2a8ff}
+.tag-door{background:#9a6700;color:#f0c97b}
+.tag-pump{background:#1b7c83;color:#a5f0f5}
 .refresh{text-align:center;padding:12px;font-size:11px;color:#484f58}
 @media(max-width:768px){.stats{flex-direction:column}.stat{flex:1}}
 </style>
@@ -227,14 +230,21 @@ th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase}
 <div class="refresh"><span>每 3 秒自动刷新</span></div>
 
 <script>
+const TYPE_LABEL = {
+  temperature:'温度', humidity:'湿度', water_level:'水位',
+  switch:'开关', status:'状态', compressor:'压缩机',
+  door:'库门', pump:'水泵'
+};
 const TYPE_TAG = {
-  temperature:'tag-temp',humidity:'tag-hum',water_level:'tag-water',
-  switch:'tag-switch',status:'tag-status'
+  temperature:'tag-temp', humidity:'tag-hum', water_level:'tag-water',
+  switch:'tag-switch', status:'tag-status',
+  compressor:'tag-comp', door:'tag-door', pump:'tag-pump'
 };
-const TYPE_ICON = {
-  temperature:'🌡',humidity:'💧',water_level:'📏',switch:'🔘',status:'⚙️'
+const TYPE_UNIT = {
+  temperature:'°C', humidity:'%', water_level:'mm',
+  switch:'', status:'', compressor:'', door:'', pump:''
 };
-const SWITCHABLE = ['switch','status'];
+const SWITCHABLE = ['switch','status','compressor','door','pump'];
 
 async function api(path, opts={}) {
   const r = await fetch(path, opts);
@@ -262,21 +272,28 @@ async function poll() {
         ? '<span class="status-dot on"></span>在线'
         : '<span class="status-dot off"></span>' + dev.last_seen_ago + 's前';
 
-      // 传感器值
+      // 数值 + 单位
       const vals = [];
       for (const st of (dev.sensor_types || [])) {
         const v = dev.states[st];
-        vals.push(`${TYPE_ICON[st]||''}${st}: ${v!==undefined?v:'-'}`);
+        const label = TYPE_LABEL[st] || st;
+        if (v !== undefined) {
+          const unit = TYPE_UNIT[st] || '';
+          const display = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(1)) : v;
+          vals.push(`${label}: ${display}${unit}`);
+        } else {
+          vals.push(`${label}: -`);
+        }
       }
       const valStr = vals.length ? vals.join(' ') : '-';
 
-      // 开关按钮: 取第一个 switchable 类型的最新值
+      // 开关注：取第一个 switchable 类型
       let toggleBtn = '';
       for (const st of SWITCHABLE) {
         if ((dev.sensor_types||[]).includes(st) && dev.states[st]!==undefined) {
           const v = dev.states[st];
           const cls = v ? 'btn-green' : 'btn-red';
-          const label = v ? 'ON' : 'OFF';
+          const label = v ? '开' : '关';
           toggleBtn = `<button class="btn ${cls}" onclick="cmdToggle(${dev.id},${v})">${label}</button>`;
           break;
         }
@@ -285,7 +302,7 @@ async function poll() {
       html += `<tr>
         <td>${dev.id}</td>
         <td>📟 ${dev.name}</td>
-        <td>${(dev.sensor_types||[]).map(s=>`<span class="tag ${TYPE_TAG[s]||''}">${TYPE_ICON[s]||''}${s}</span>`).join(' ')}</td>
+        <td>${(dev.sensor_types||[]).map(s=>`<span class="tag ${TYPE_TAG[s]||''}">${TYPE_LABEL[s]||s}</span>`).join(' ')}</td>
         <td>${valStr}</td>
         <td>${dot}</td>
         <td>${toggleBtn}</td>
