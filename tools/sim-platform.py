@@ -516,20 +516,20 @@ async function api(path, opts={}) {
 }
 
 function preset(name) {
-  api('/api/preset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({preset:name})});
+  api('api/preset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({preset:name})});
 }
 
 function createGW() {
   const name = prompt('网关名称:', 'Gateway');
-  if (name) api('/api/gateway/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
+  if (name) api('api/gateway/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
 }
 
 function gwAction(id, action) {
-  api(`/api/gateway/${id}/${action}`, {method:'POST'});
+  api(`api/gateway/${id}/${action}`, {method:'POST'});
 }
 
 function gwDelete(id) {
-  if (confirm('删除网关?')) api(`/api/gateway/${id}/delete`, {method:'POST'});
+  if (confirm('删除网关?')) api(`api/gateway/${id}/delete`, {method:'POST'});
 }
 
 function createNode() {
@@ -541,16 +541,16 @@ function doCreateNode() {
   const stype = document.getElementById('nf-type').value;
   const gid = parseInt(document.getElementById('nf-gw').value);
   const iv = parseInt(document.getElementById('nf-int').value) || 10;
-  api('/api/node/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, sensor_type:stype, gateway_id:gid, interval:iv})});
+  api('api/node/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, sensor_type:stype, gateway_id:gid, interval:iv})});
   document.getElementById('node-form').style.display = 'none';
 }
 
 function nodeAction(id, action) {
-  api(`/api/node/${id}/${action}`, {method:'POST'});
+  api(`api/node/${id}/${action}`, {method:'POST'});
 }
 
 function nodeDelete(id) {
-  if(confirm('删除节点?')) api(`/api/node/${id}/delete`, {method:'POST'});
+  if(confirm('删除节点?')) api(`api/node/${id}/delete`, {method:'POST'});
 }
 
 function clearLog() {
@@ -569,7 +569,7 @@ const TYPE_LABEL = {
 
 async function poll() {
   try {
-    const d = await api('/api/state');
+    const d = await api('api/state');
 
     // Gateway table
     let gwHtml = '<tr><th>ID</th><th>名称</th><th>状态</th><th>收包</th><th>节点数</th><th>操作</th></tr>';
@@ -610,7 +610,7 @@ async function poll() {
 
   // Logs
   try {
-    const lines = await api('/api/logs?since=' + lastLog);
+    const lines = await api('api/logs?since=' + lastLog);
     if (lines.length) {
       const logEl = document.getElementById('log');
       if (logEl.querySelector('.empty')) logEl.innerHTML = '';
