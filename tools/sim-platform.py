@@ -135,6 +135,8 @@ class Node:
         self.thread = None
         self.count = 0
         self.battery = SENSOR_PROFILES[sensor_type].get("battery", 3.75)
+        self.forced_value = None  # None=random, 0/1=forced
+        self.last_value = 0
 
     def start(self):
         if self.running: return
@@ -170,7 +172,12 @@ class Node:
                 {"type": "humidity", "value": h, "unit": "%"},
             ]
         elif profile.get("int_output"):
-            val = random.randint(*profile["range"])
+            if self.forced_value is not None:
+                val = self.forced_value
+                self.last_value = val
+                self.forced_value = None  # one-shot
+            else:
+                val = self.last_value  # keep last value
             sensors = [{"type": self.sensor_type, "value": val}]
         else:
             val = round(random.uniform(*profile["range"]), 1)
@@ -198,6 +205,7 @@ class Node:
             "running": self.running,
             "count": self.count,
             "battery": self.battery,
+            "last_value": self.last_value,
         }
 
 # ═══════════════════════════════════════════════════════════
@@ -334,6 +342,17 @@ class Handler(BaseHTTPRequestHandler):
                 del nodes[nid]
                 log(f"🗑 Node [{nid}] deleted")
                 return self._json({"ok": True})
+
+        elif path.startswith("/api/node/") and path.endswith("/cmd"):
+            nid = int(path.split("/")[3])
+            if nid in nodes:
+                val = body.get("value")
+                if val is not None:
+                    nodes[nid].forced_value = int(val)
+                    nodes[nid].last_value = nodes[nid].forced_value
+                    log(f"⬇ CMD Node [{nid}] → {val}")
+                    return self._json(nodes[nid].to_dict())
+                return self._json({"error": "missing value"}, 400)
 
         elif path.startswith("/api/node/") and path.endswith("/update"):
             nid = int(path.split("/")[3])
@@ -581,7 +600,12 @@ function gwDelete(id) {
   if (confirm('删除网关?')) api(`api/gateway/${id}/delete`, {method:'POST'});
 }
 
-let editTarget = null; // {type:'gw'|'node', id:N}
+let editTarget = null;
+
+function nodeCmd(id, value) {
+  api(`api/node/${id}/cmd`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({value})});
+}
+ // {type:'gw'|'node', id:N}
 
 function editGW(id) {
   const g = window._gwData[id];
@@ -698,7 +722,7 @@ async function poll() {
         <td><span class="tag ${TYPE_TAG[n.sensor_type]||''}">${TYPE_LABEL[n.sensor_type]||n.sensor_type}</span></td>
         <td>${gwMap[n.gateway_id] || 'GW'+n.gateway_id}</td><td>${n.interval}s</td><td>${n.count}</td>
         <td>🔋${n.battery}V</td><td>${dot}</td>
-        <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="editNode(${n.id})">⚙</button> <button class="btn btn-gray" onclick="nodeDelete(${n.id})">🗑</button></td>
+        <td>${startBtn} ${stopBtn} ${(n.sensor_type==="switch"||n.sensor_type==="status")?`<button class="btn ${n.last_value?'btn-green':'btn-red'}" onclick="nodeCmd(${n.id},${n.last_value?0:1})">${n.last_value?"ON":"OFF"}</button>`:""} <button class="btn btn-gray" onclick="editNode(${n.id})">⚙</button> <button class="btn btn-gray" onclick="nodeDelete(${n.id})">🗑</button></td>
       </tr>`;
     }
     document.getElementById('node-table').innerHTML = nodeHtml;
