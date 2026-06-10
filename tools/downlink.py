@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kiwi 下行控制 + Web 控制面板
-MQTT 指令收发 + HTTP 控制页面
+Kiwi 下行控制面板 v2.0
+UI 对齐模拟平台，设备从 DB 动态加载，MQTT 下发真实指令
 """
 import json
 import time
@@ -22,50 +22,87 @@ DB_NAME = "monitor"
 DB_USER = "postgres"
 DB_PASS = "monitor_sensor_2026"
 
-# 可控设备列表
-DEVICES = [
-    {"id": 30, "name": "冷库1号门", "group": "🚪 库门"},
-    {"id": 31, "name": "冷库2号门", "group": "🚪 库门"},
-    {"id": 32, "name": "冷库3号门", "group": "🚪 库门"},
-    {"id": 40, "name": "冷库1号压缩机", "group": "⚙️ 压缩机"},
-    {"id": 41, "name": "冷库2号压缩机", "group": "⚙️ 压缩机"},
-    {"id": 42, "name": "冷库3号压缩机", "group": "⚙️ 压缩机"},
-    {"id": 50, "name": "水箱1号泵", "group": "💧 水泵"},
-    {"id": 51, "name": "水箱2号泵", "group": "💧 水泵"},
-]
-
 mqtt_client = None
 
 
 def get_db():
-    return psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS)
+    return psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+                            user=DB_USER, password=DB_PASS)
 
 
-def get_device_state(device_id):
-    """从 DB 查询设备最新状态"""
+def get_all_devices():
+    """从 DB 加载所有设备及其最新状态"""
     try:
         db = get_db()
         cur = db.cursor()
         cur.execute("""
-            SELECT value FROM sensor_data
-            WHERE device_id = %s AND sensor_type IN ('status','switch')
-            ORDER BY time DESC LIMIT 1
-        """, (device_id,))
-        row = cur.fetchone()
+            SELECT d.device_id, d.device_name, d.sensor_types, d.last_seen,
+                   COALESCE(EXTRACT(EPOCH FROM NOW()-d.last_seen), 99999) AS ago_s
+            FROM devices d ORDER BY d.device_id
+        """)
+        rows = cur.fetchall()
         db.close()
-        return int(row[0]) if row else 0
-    except:
-        return 0
+
+        devices = []
+        for row in rows:
+            did, name, stypes_str, last_seen, ago_s = row
+            # 解析 sensor_types JSON
+            try:
+                stypes = json.loads(stypes_str) if isinstance(stypes_str, str) else (stypes_str or [])
+            except:
+                stypes = []
+
+            # 查最新传感器值
+            states = {}
+            try:
+                db2 = get_db()
+                cur2 = db2.cursor()
+                cur2.execute("""
+                    SELECT DISTINCT ON (sensor_type) sensor_type, value, time
+                    FROM sensor_data WHERE device_id = %s
+                    ORDER BY sensor_type, time DESC
+                """, (did,))
+                for sr in cur2.fetchall():
+                    states[sr[0]] = sr[1]
+                db2.close()
+            except:
+                pass
+
+            online = ago_s < 600  # 10分钟内活跃=在线
+
+            devices.append({
+                "id": did, "name": name,
+                "sensor_types": stypes,
+                "states": states,
+                "online": online,
+                "last_seen_ago": int(ago_s),
+            })
+        return devices
+    except Exception as e:
+        print(f"DB error: {e}")
+        return []
 
 
 def send_cmd(device_id, value):
-    """通过 MQTT 下发指令"""
+    """通过 MQTT 下发真实指令"""
     if mqtt_client is None:
         return False
     try:
         payload = json.dumps({"value": value, "action": "on" if value else "off"})
-        topic = f"monitor/cmd/{device_id}"
-        mqtt_client.publish(topic, payload, qos=1)
+        mqtt_client.publish(f"monitor/cmd/{device_id}", payload, qos=1)
+        # 同时发 HTTP /ingest 让模拟节点也能响应
+        import urllib.request
+        ingest_payload = json.dumps({
+            "device_id": device_id,
+            "sensors": [{"type": "status", "value": value}],
+            "timestamp": int(time.time()),
+        }).encode()
+        req = urllib.request.Request(
+            "https://kiwi.maengyi.top/ingest",
+            data=ingest_payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=3)
         return True
     except Exception as e:
         print(f"下发失败: {e}")
@@ -85,16 +122,6 @@ def on_message(client, userdata, msg):
         if value is None:
             return
         print(f"[下行] 设备 {device_id} ← {value}")
-        sensor_payload = {
-            "device_id": device_id,
-            "dev_eui": f"DOWNLINK{device_id:04X}",
-            "sensors": [{"type": "status" if device_id >= 40 else "switch", "value": value, "unit": ""}],
-            "battery": 3.75, "rssi": -75, "snr": 8.0,
-            "frame_counter": int(time.time()) % 256, "data_rate": 3,
-            "timestamp": int(time.time()),
-        }
-        client.publish(f"monitor/{device_id}/data", json.dumps(sensor_payload), qos=1)
-        print(f"[下行] 设备 {device_id} → 回传: {value}")
     except Exception as e:
         print(f"[下行] 错误: {e}")
 
@@ -112,9 +139,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, content, code=200):
-        body = content.encode()
-        self.send_response(code)
+    def _html(self):
+        body = HTML.encode()
+        self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -123,16 +150,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
-            return self._html(HTML)
+            return self._html()
         elif path == "/api/state":
-            states = {}
-            for dev in DEVICES:
-                val = get_device_state(dev["id"])
-                states[str(dev["id"])] = val
-            return self._json({"ok": True, "devices": DEVICES, "states": states})
+            devices = get_all_devices()
+            total = len(devices)
+            online = sum(1 for d in devices if d["online"])
+            return self._json({"ok": True, "devices": devices,
+                               "total": total, "online": online})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -144,10 +170,10 @@ class Handler(BaseHTTPRequestHandler):
             ok = send_cmd(device_id, value)
             return self._json({"ok": ok})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._json({"error": "not found"}, 404)
 
 
+# ═══════════════════════════════════════════════════════════
 HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -156,75 +182,124 @@ HTML = """<!DOCTYPE html>
 <title>🥝 Kiwi 控制面板</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh;padding:20px}
-h1{font-size:20px;color:#58a6ff;text-align:center;margin-bottom:4px}
-.sub{text-align:center;color:#8b949e;font-size:13px;margin-bottom:20px}
-.group{margin-bottom:16px}
-.group-title{font-size:15px;font-weight:600;color:#58a6ff;padding:6px 0;border-bottom:1px solid #30363d;margin-bottom:8px}
-.device-row{display:flex;align-items:center;justify-content:space-between;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 16px;margin-bottom:6px}
-.device-name{font-size:15px;font-weight:500}
-.toggle{position:relative;width:56px;height:30px;border-radius:15px;border:none;cursor:pointer;transition:.3s;outline:none}
-.toggle.off{background:#30363d}
-.toggle.on{background:#238636}
-.toggle::after{content:'';position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#fff;transition:.3s}
-.toggle.on::after{left:29px}
-.status-text{font-size:12px;min-width:40px;text-align:right}
-.status-text.on{color:#3fb950}
-.status-text.off{color:#8b949e}
-.refresh{text-align:center;margin-top:16px}
-.refresh span{font-size:12px;color:#484f58}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+.header{background:#161b22;padding:12px 20px;border-bottom:1px solid #30363d;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:18px;color:#58a6ff}
+.stats{display:flex;gap:16px;padding:12px 20px;flex-wrap:wrap}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px}
+.stat .label{font-size:11px;color:#8b949e;text-transform:uppercase}
+.stat .value{font-size:22px;font-weight:700;color:#58a6ff}
+.panel{margin:12px 20px;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.panel-title{padding:10px 16px;background:#1c2129;font-size:14px;font-weight:600;border-bottom:1px solid #30363d}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #21262d}
+th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.on{background:#3fb950;box-shadow:0 0 6px #3fb950}
+.status-dot.off{background:#484f58}
+.btn{padding:5px 12px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:.15s}
+.btn-green{background:#238636;color:#fff}
+.btn-red{background:#da3633;color:#fff}
+.btn-gray{background:#30363d;color:#8b949e}
+.btn:active{transform:scale(.96)}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.tag-temp{background:#b62324;color:#ffa198}
+.tag-hum{background:#1f6feb;color:#a5d8ff}
+.tag-water{background:#1b7c83;color:#a5f0f5}
+.tag-switch{background:#9a6700;color:#f0c97b}
+.tag-status{background:#6e40c9;color:#d2a8ff}
+.refresh{text-align:center;padding:12px;font-size:11px;color:#484f58}
+@media(max-width:768px){.stats{flex-direction:column}.stat{flex:1}}
 </style>
 </head>
 <body>
-<h1>🥝 Kiwi 控制面板</h1>
-<div class="sub">设备开关控制</div>
-<div id="groups"></div>
-<div class="refresh"><span>状态自动刷新</span></div>
+<div class="header">
+  <h1>🥝 Kiwi 控制面板</h1>
+</div>
+<div class="stats">
+  <div class="stat"><div class="label">总设备</div><div class="value" id="total">-</div></div>
+  <div class="stat"><div class="label">在线</div><div class="value" id="online">-</div></div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">📟 设备列表</div>
+  <table><thead><tr>
+    <th>ID</th><th>名称</th><th>类型</th><th>数值</th><th>在线</th><th>操作</th>
+  </tr></thead><tbody id="device-table"></tbody></table>
+</div>
+<div class="refresh"><span>每 3 秒自动刷新</span></div>
 
 <script>
-const GROUPS = {};
+const TYPE_TAG = {
+  temperature:'tag-temp',humidity:'tag-hum',water_level:'tag-water',
+  switch:'tag-switch',status:'tag-status'
+};
+const TYPE_ICON = {
+  temperature:'🌡',humidity:'💧',water_level:'📏',switch:'🔘',status:'⚙️'
+};
+const SWITCHABLE = ['switch','status'];
 
-async function load() {
-  const r = await fetch('api/state');
-  const d = await r.json();
-  const groups = {};
-  for (const dev of d.devices) {
-    if (!groups[dev.group]) groups[dev.group] = [];
-    groups[dev.group].push(dev);
-  }
-  const html = Object.entries(groups).map(([g, devs]) => `
-    <div class="group">
-      <div class="group-title">${g}</div>
-      ${devs.map(dev => {
-        const state = d.states[dev.id] || 0;
-        const cls = state ? 'on' : 'off';
-        const label = g.includes('门') ? (state ? '⚠开' : '关') : (state ? '运行' : '停机');
-        return `<div class="device-row">
-          <span class="device-name">${dev.name}</span>
-          <span class="status-text ${cls}">${label}</span>
-          <button class="toggle ${cls}" data-id="${dev.id}" data-state="${state}" onclick="toggle(this)"></button>
-        </div>`;
-      }).join('')}
-    </div>
-  `).join('');
-  document.getElementById('groups').innerHTML = html;
+async function api(path, opts={}) {
+  const r = await fetch(path, opts);
+  return r.json();
 }
 
-async function toggle(btn) {
-  const id = parseInt(btn.dataset.id);
-  const cur = parseInt(btn.dataset.state);
-  const next = cur ? 0 : 1;
-  btn.disabled = true;
-  await fetch('api/cmd', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({device_id: id, value: next})
+function cmdToggle(deviceId, curVal) {
+  const next = curVal ? 0 : 1;
+  api('api/cmd', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({device_id:deviceId, value:next})
   });
-  setTimeout(load, 800);
 }
 
-load();
-setInterval(load, 5000);
+async function poll() {
+  try {
+    const d = await api('api/state');
+    document.getElementById('total').textContent = d.total;
+    document.getElementById('online').textContent = d.online;
+
+    let html = '';
+    for (const dev of d.devices) {
+      const dot = dev.online
+        ? '<span class="status-dot on"></span>在线'
+        : '<span class="status-dot off"></span>' + dev.last_seen_ago + 's前';
+
+      // 传感器值
+      const vals = [];
+      for (const st of (dev.sensor_types || [])) {
+        const v = dev.states[st];
+        vals.push(`${TYPE_ICON[st]||''}${st}: ${v!==undefined?v:'-'}`);
+      }
+      const valStr = vals.length ? vals.join(' ') : '-';
+
+      // 开关按钮: 取第一个 switchable 类型的最新值
+      let toggleBtn = '';
+      for (const st of SWITCHABLE) {
+        if ((dev.sensor_types||[]).includes(st) && dev.states[st]!==undefined) {
+          const v = dev.states[st];
+          const cls = v ? 'btn-green' : 'btn-red';
+          const label = v ? 'ON' : 'OFF';
+          toggleBtn = `<button class="btn ${cls}" onclick="cmdToggle(${dev.id},${v})">${label}</button>`;
+          break;
+        }
+      }
+
+      html += `<tr>
+        <td>${dev.id}</td>
+        <td>📟 ${dev.name}</td>
+        <td>${(dev.sensor_types||[]).map(s=>`<span class="tag ${TYPE_TAG[s]||''}">${TYPE_ICON[s]||''}${s}</span>`).join(' ')}</td>
+        <td>${valStr}</td>
+        <td>${dot}</td>
+        <td>${toggleBtn}</td>
+      </tr>`;
+    }
+    document.getElementById('device-table').innerHTML = html || '<tr><td colspan="6" style="color:#484f58;text-align:center;padding:40px">暂无设备</td></tr>';
+  } catch(e) {}
+}
+
+setInterval(poll, 3000);
+poll();
 </script>
 </body>
 </html>"""
@@ -234,7 +309,7 @@ def main():
     global mqtt_client
 
     # MQTT
-    mqtt_client = mqtt.Client(client_id="downlink-sim", protocol=mqtt.MQTTv5,
+    mqtt_client = mqtt.Client(client_id="kiwi-downlink", protocol=mqtt.MQTTv5,
                               callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
@@ -246,7 +321,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8082
     server = HTTPServer(("0.0.0.0", port), Handler)
     print("=" * 50)
-    print("🥝 Kiwi 控制面板")
+    print("🥝 Kiwi 控制面板 v2.0")
     print(f"   http://localhost:{port}")
     print(f"   MQTT: {MQTT_BROKER}:{MQTT_PORT}")
     print("=" * 50)
