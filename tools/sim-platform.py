@@ -291,6 +291,15 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"🗑 Gateway [{gid}] deleted")
                 return self._json({"ok": True})
 
+        elif path.startswith("/api/gateway/") and path.endswith("/update"):
+            gid = int(path.split("/")[3])
+            if gid in gateways:
+                gw = gateways[gid]
+                if "name" in body:
+                    gw.name = body["name"]
+                log(f"✏ Gateway [{gid}] updated")
+                return self._json(gw.to_dict())
+
         # ─── Node ───
         elif path == "/api/node/create":
             nid = next_node_id; next_node_id += 1
@@ -325,6 +334,24 @@ class Handler(BaseHTTPRequestHandler):
                 del nodes[nid]
                 log(f"🗑 Node [{nid}] deleted")
                 return self._json({"ok": True})
+
+        elif path.startswith("/api/node/") and path.endswith("/update"):
+            nid = int(path.split("/")[3])
+            if nid in nodes:
+                node = nodes[nid]
+                was_running = node.running
+                if was_running: node.stop()
+                if "name" in body:
+                    node.name = body["name"]
+                if "interval" in body:
+                    node.interval = max(1, int(body["interval"]))
+                if "gateway_id" in body:
+                    new_gid = int(body["gateway_id"])
+                    if new_gid in gateways:
+                        node.gateway_id = new_gid
+                if was_running: node.start()
+                log(f"✏ Node [{nid}] updated")
+                return self._json(node.to_dict())
 
         # ─── 一键预设 ───
         elif path == "/api/preset":
@@ -498,6 +525,19 @@ th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase}
   </div>
 </div>
 
+<!-- 编辑面板 (隐藏) -->
+<div class="panel" id="edit-panel" style="display:none">
+  <div class="panel-title"><span id="edit-title">✏ 编辑</span></div>
+  <div class="form-row">
+    <div><label>名称</label><input id="ef-name"></div>
+    <div id="ef-type-group" style="display:none"><label>传感器类型</label><span id="ef-type-text" style="padding:7px 0;font-size:13px"></span></div>
+    <div id="ef-gw-group"><label>绑定网关</label><select id="ef-gw"></select></div>
+    <div id="ef-int-group"><label>上报间隔(s)</label><input id="ef-int" type="number" min="1"></div>
+    <button class="btn btn-green" onclick="doUpdate()">💾 保存</button>
+    <button class="btn btn-gray" onclick="document.getElementById('edit-panel').style.display='none'">取消</button>
+  </div>
+</div>
+
 <!-- 日志 -->
 <div class="panel">
   <div class="panel-title">
@@ -530,6 +570,46 @@ function gwAction(id, action) {
 
 function gwDelete(id) {
   if (confirm('删除网关?')) api(`api/gateway/${id}/delete`, {method:'POST'});
+}
+
+let editTarget = null; // {type:'gw'|'node', id:N}
+
+function editGW(id) {
+  const g = window._gwData[id];
+  editTarget = {type:'gw', id};
+  document.getElementById('edit-title').textContent = '✏ 编辑网关 #'+id;
+  document.getElementById('ef-name').value = g.name;
+  document.getElementById('ef-gw-group').style.display = 'none';
+  document.getElementById('ef-int-group').style.display = 'none';
+  document.getElementById('ef-type-group').style.display = 'none';
+  document.getElementById('edit-panel').style.display = 'block';
+}
+
+function editNode(id) {
+  const n = window._nodeData[id];
+  editTarget = {type:'node', id};
+  document.getElementById('edit-title').textContent = '✏ 编辑节点 #'+id;
+  document.getElementById('ef-name').value = n.name;
+  document.getElementById('ef-int').value = n.interval;
+  document.getElementById('ef-gw-group').style.display = 'block';
+  document.getElementById('ef-int-group').style.display = 'block';
+  document.getElementById('ef-type-group').style.display = 'block';
+  document.getElementById('ef-type-text').textContent = n.sensor_type;
+  document.getElementById('edit-panel').style.display = 'block';
+}
+
+function doUpdate() {
+  if (!editTarget) return;
+  const {type, id} = editTarget;
+  const name = document.getElementById('ef-name').value;
+  const body = {name};
+  if (type === 'node') {
+    body.interval = parseInt(document.getElementById('ef-int').value) || 10;
+    body.gateway_id = parseInt(document.getElementById('ef-gw').value);
+  }
+  api(`api/${type}/${id}/update`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  document.getElementById('edit-panel').style.display = 'none';
+  editTarget = null;
 }
 
 function createNode() {
@@ -575,12 +655,14 @@ async function poll() {
     let gwHtml = '<tr><th>ID</th><th>名称</th><th>状态</th><th>收包</th><th>节点数</th><th>操作</th></tr>';
     for (const g of d.gateways) {
       const dot = g.running ? '<span class="status-dot on"></span>运行中' : '<span class="status-dot off"></span>已停止';
+      window._gwData = window._gwData || {};
+      window._gwData[g.id] = g;
       const startBtn = g.running ? '' : `<button class="btn btn-green" onclick="gwAction(${g.id},'start')">▶</button>`;
       const stopBtn = g.running ? `<button class="btn btn-red" onclick="gwAction(${g.id},'stop')">⏹</button>` : '';
       gwHtml += `<tr>
         <td>${g.id}</td><td>📡 ${g.name}</td><td>${dot}</td>
         <td>${g.pkts}</td><td>${g.nodes}</td>
-        <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="gwDelete(${g.id})">🗑</button></td>
+        <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="editGW(${g.id})">⚙</button> <button class="btn btn-gray" onclick="gwDelete(${g.id})">🗑</button></td>
       </tr>`;
     }
     document.getElementById('gw-table').innerHTML = gwHtml;
@@ -592,6 +674,8 @@ async function poll() {
     // Node table
     let nodeHtml = '<tr><th>ID</th><th>名称</th><th>类型</th><th>网关</th><th>间隔</th><th>上报</th><th>电池</th><th>状态</th><th>操作</th></tr>';
     for (const n of d.nodes) {
+      window._nodeData = window._nodeData || {};
+      window._nodeData[n.id] = n;
       const dot = n.running ? '<span class="status-dot on"></span>运行' : '<span class="status-dot off"></span>停止';
       const startBtn = n.running ? '' : `<button class="btn btn-green" onclick="nodeAction(${n.id},'start')">▶</button>`;
       const stopBtn = n.running ? `<button class="btn btn-red" onclick="nodeAction(${n.id},'stop')">⏹</button>` : '';
@@ -600,7 +684,7 @@ async function poll() {
         <td><span class="tag ${TYPE_TAG[n.sensor_type]||''}">${TYPE_LABEL[n.sensor_type]||n.sensor_type}</span></td>
         <td>${gwMap[n.gateway_id] || 'GW'+n.gateway_id}</td><td>${n.interval}s</td><td>${n.count}</td>
         <td>🔋${n.battery}V</td><td>${dot}</td>
-        <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="nodeDelete(${n.id})">🗑</button></td>
+        <td>${startBtn} ${stopBtn} <button class="btn btn-gray" onclick="editNode(${n.id})">⚙</button> <button class="btn btn-gray" onclick="nodeDelete(${n.id})">🗑</button></td>
       </tr>`;
     }
     document.getElementById('node-table').innerHTML = nodeHtml;
