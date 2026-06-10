@@ -25,3 +25,7 @@ uint8_t  get_saved_tx_power(void);
 void     set_saved_tx_power(uint8_t p);
 uint16_t get_report_interval(void);
 void     set_report_interval(uint16_t iv);
+
+// ─── 芯片 UID ───
+uint16_t       get_uid_device_id(void);   // UID[10:11] → 0~65535
+const uint8_t* get_uid_dev_eui(void);     // 8字节 DevEUI (UID[0:5]+UID[10:11])

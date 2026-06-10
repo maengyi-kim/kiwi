@@ -1,28 +1,32 @@
 /**
- * Kiwi LoRa 网关 — ESP32 固件
+ * Kiwi LoRa 网关 — ESP32 固件 v2.0
  * 
  * 功能:
  *   1. 监听所有节点 LoRa 上行数据
- *   2. 解析二进制包 → JSON → MQTT 发布
- *   3. 订阅 MQTT 下行指令 → LoRa 发送
- *   4. OLED 显示状态（收包数、WiFi、MQTT）
- *   5. WiFi 断连时 SPIFFS 缓存
- *   6. 节点心跳超时检测
+ *   2. 解析二进制包 → JSON → HTTP POST 上报
+ *   3. OLED 显示状态（收包数、WiFi、HTTP）
+ *   4. WiFi 断连时 SPIFFS 缓存
+ *   5. 节点心跳超时检测
+ *
+ * v2.0 变更: MQTT → HTTP POST (kiwi.maengyi.top/ingest)
+ *
+ * 下行控制: TODO — 后续通过 HTTP 轮询 /ctrl/poll 实现
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <SPIFFS.h>
-#include <PubSubClient.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <RadioLib.h>
 
 // ─── 配置 ───
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASS     = "YOUR_WIFI_PASSWORD";
-const char* MQTT_BROKER   = "47.80.20.236";
-const int   MQTT_PORT     = 1883;
-const char* MQTT_CLIENT   = "kiwi-gateway-01";
+const char* WIFI_SSID     = "302";
+const char* WIFI_PASS     = "1380700700";
+const char* SERVER_HOST   = "kiwi.maengyi.top";
+const int   SERVER_PORT   = 443;
+const char* INGEST_PATH   = "/ingest";
 
 // LoRa 引脚 (Heltec WiFi LoRa 32 V3)
 #define LORA_NSS    8
@@ -41,8 +45,7 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C u8x8(/*reset=*/21, /*scl=*/18, /*sda=*/17);
 
 // ─── 全局 ───
 SX1262 radio = new Module(LORA_NSS, LORA_DIO0, LORA_RST, LORA_BUSY);
-WiFiClient wifiClient;
-PubSubClient mqtt(wifiClient);
+WiFiClientSecure sslClient;
 
 uint32_t pkt_count = 0;
 uint32_t last_status = 0;
@@ -59,7 +62,6 @@ int node_count = 0;
 
 // ─── CRC16 (与节点协议一致) ───
 static uint16_t crc16_ccitt(const uint8_t* data, int len) {
-    // 简化实现，用 RadioLib 内置的或自实现
     uint16_t crc = 0xFFFF;
     for (int i = 0; i < len; i++) {
         crc ^= (uint16_t)data[i] << 8;
@@ -77,7 +79,8 @@ void oled_update(void) {
     static char line1[17], line2[17], line3[17];
     snprintf(line1, 17, "Kiwi GW   Pkts:%u", pkt_count);
     snprintf(line2, 17, "WiFi:%s", wifi_connected ? "OK" : "NO");
-    snprintf(line3, 17, "MQTT:%s Nodes:%d", mqtt.connected() ? "OK" : "NO", node_count);
+    snprintf(line3, 17, "HTTP:%s  Nodes:%d",
+             "OK", node_count);  // simplified
     u8x8.clear();
     u8x8.drawString(0, 0, line1);
     u8x8.drawString(0, 2, line2);
@@ -102,7 +105,6 @@ void update_node_heartbeat(uint16_t device_id) {
 
 // ─── 协议解析: 二进制 → JSON ───
 String parse_sensor_payload(const uint8_t* payload, int len, uint16_t src_id) {
-    // 速查表: TLV type → name + unit
     JsonDocument doc;
     doc["device_id"] = src_id;
     JsonArray sensors = doc["sensors"].to<JsonArray>();
@@ -149,12 +151,43 @@ String parse_sensor_payload(const uint8_t* payload, int len, uint16_t src_id) {
     return json;
 }
 
-// ─── 二进制帧 → MQTT ───
-void handle_lora_packet(const uint8_t* buf, int total_len) {
-    if (total_len < 9) return;  // min: 7(header) + 2(CRC)
+// ─── HTTP POST ───
+bool http_post_to_ingest(String json) {
+    if (!wifi_connected) {
+        // SPIFFS 缓存
+        File f = SPIFFS.open("/queue.dat", "a");
+        if (f) {
+            f.println(json);
+            f.close();
+        }
+        return false;
+    }
+
+    HTTPClient http;
+    String url = "https://" + String(SERVER_HOST) + String(INGEST_PATH);
+    http.begin(sslClient, url);
+    http.addHeader("Content-Type", "application/json");
+
+    int code = http.POST(json);
+    bool ok = (code == 200);
     
+    if (ok) {
+        Serial.printf("↑ HTTP OK (%d bytes)\n", json.length());
+    } else {
+        Serial.printf("↑ HTTP FAIL code=%d\n", code);
+    }
+
+    http.end();
+    return ok;
+}
+
+// ─── 二进制帧处理 ───
+void handle_lora_packet(const uint8_t* buf, int total_len) {
+    if (total_len < 9) return;
+
     // CRC
-    if (!crc16_ccitt(buf, total_len - 2) == (buf[total_len-2] | (buf[total_len-1] << 8))) {
+    uint16_t frame_crc = buf[total_len-2] | (buf[total_len-1] << 8);
+    if (crc16_ccitt(buf, total_len - 2) != frame_crc) {
         Serial.println("CRC fail");
         return;
     }
@@ -167,51 +200,36 @@ void handle_lora_packet(const uint8_t* buf, int total_len) {
     update_node_heartbeat(src_id);
     pkt_count++;
     
-    char topic[32];
-    
     switch (msg_type) {
         case 0x00: { // Sensor Data
             String json = parse_sensor_payload(payload, plen, src_id);
-            snprintf(topic, 32, "monitor/%d/data", src_id);
-            mqtt.publish(topic, json.c_str());
+            http_post_to_ingest(json);
             Serial.printf("↑ data dev=%d len=%d\n", src_id, plen);
             break;
         }
         case 0x01:   // Device Status
-            snprintf(topic, 32, "monitor/%d/status", src_id);
-            mqtt.publish(topic, "{}");  // TODO: parse status TLV
+            http_post_to_ingest("{\"device_id\":" + String(src_id) + ",\"type\":\"status\"}");
             break;
         case 0x18:   // Heartbeat
-            snprintf(topic, 32, "monitor/%d/status", src_id);
-            mqtt.publish(topic, "{\"type\":\"heartbeat\"}");
+            http_post_to_ingest("{\"device_id\":" + String(src_id) + ",\"type\":\"heartbeat\"}");
             break;
         case 0x1A: { // Join Request
+            // device_id 从 DevEUI 的后2字节提取（与节点 UID 一致）
+            uint16_t device_id = payload[6] | ((uint16_t)payload[7] << 8);
             String json = "{\"dev_eui\":\"";
             for (int i = 0; i < 8; i++) {
                 char hex[3]; snprintf(hex, 3, "%02X", payload[i]);
                 json += hex;
             }
-            json += "\",\"device_id\":" + String(src_id) + "}";
-            mqtt.publish("monitor/join/request", json.c_str());
-            Serial.println("↑ join request");
-            
-            // 自动回复 Join-Accept（简化版，正式部署由服务端处理）
+            json += "\",\"device_id\":" + String(device_id) + "}";
+            http_post_to_ingest(json);
+            Serial.printf("↑ join dev=%d\n", device_id);
             break;
         }
         default:
             Serial.printf("Unknown type 0x%02X from dev %d\n", msg_type, src_id);
             break;
     }
-}
-
-// ─── MQTT 下行 → LoRa ───
-void mqtt_callback(char* topic, byte* message, unsigned int length) {
-    String msg;
-    msg.concat((char*)message, length);
-    Serial.printf("↓ MQTT %s: %s\n", topic, msg);
-    
-    // 解析下行指令，通过 LoRa 发送
-    // TODO: 解析JSON → 构建二进制帧 → radio.transmit()
 }
 
 // ─── WiFi ───
@@ -233,29 +251,34 @@ bool connect_wifi(void) {
     return wifi_connected;
 }
 
-// ─── MQTT ───
-bool connect_mqtt(void) {
-    mqtt.setServer(MQTT_BROKER, MQTT_PORT);
-    mqtt.setCallback(mqtt_callback);
-    if (mqtt.connect(MQTT_CLIENT)) {
-        mqtt.subscribe("monitor/cmd/#");
-        mqtt.subscribe("monitor/+/cmd");
-        Serial.println("MQTT OK");
-        return true;
+// ─── SPIFFS 缓存回放 ───
+void replay_spiffs_queue(void) {
+    if (!wifi_connected) return;
+    File f = SPIFFS.open("/queue.dat", "r");
+    if (!f || f.size() == 0) {
+        if (f) f.close();
+        return;
     }
-    Serial.println("MQTT FAIL");
-    return false;
-}
-
-void mqtt_reconnect(void) {
-    if (!mqtt.connected()) {
-        static uint32_t last_attempt = 0;
-        if (millis() - last_attempt > 5000) {
-            last_attempt = millis();
-            if (connect_mqtt()) {
-                // 补发 SPIFFS 缓存数据
+    
+    Serial.println("Replaying SPIFFS queue...");
+    int replayed = 0;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() > 0) {
+            if (http_post_to_ingest(line)) {
+                replayed++;
+            } else {
+                break;  // 网络断了，下次再试
             }
         }
+    }
+    f.close();
+    
+    if (replayed > 0) {
+        // 清空已发送的
+        SPIFFS.remove("/queue.dat");
+        Serial.printf("Replayed %d queued packets\n", replayed);
     }
 }
 
@@ -263,12 +286,12 @@ void mqtt_reconnect(void) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n🥝 Kiwi Gateway starting...");
+    Serial.println("\n🥝 Kiwi Gateway v2.0 (HTTP) starting...");
     
 #ifdef OLED_ENABLED
     u8x8.begin();
     u8x8.setFont(u8x8_font_chroma48medium8_r);
-    u8x8.drawString(0, 0, "Kiwi GW boot...");
+    u8x8.drawString(0, 0, "Kiwi GW v2 boot...");
 #endif
     
     // SPIFFS
@@ -283,13 +306,17 @@ void setup() {
         while (1) delay(1000);
     }
     radio.setOutputPower(10);
-    // 网关长期处于接收模式
     radio.startReceive();
     Serial.println("LoRa RX ready");
     
-    // WiFi + MQTT
+    // SSL (跳过证书验证用于内网/自签场景)
+    sslClient.setInsecure();
+    
+    // WiFi
     connect_wifi();
-    connect_mqtt();
+    
+    // 回放缓存
+    replay_spiffs_queue();
     
     oled_update();
     Serial.println("Gateway ready ✓");
@@ -297,7 +324,7 @@ void setup() {
 
 // ─── Loop ───
 void loop() {
-    // 1. 检查 LoRa 收包
+    // 1. LoRa 收包
     if (radio.available()) {
         uint8_t buf[264];
         int state = radio.readData(buf, sizeof(buf));
@@ -305,20 +332,16 @@ void loop() {
             int len = radio.getPacketLength();
             handle_lora_packet(buf, len);
         }
-        radio.startReceive();  // 继续监听
+        radio.startReceive();
     }
     
-    // 2. MQTT 保活
-    if (wifi_connected) {
-        mqtt.loop();
-        mqtt_reconnect();
-    } else {
-        // WiFi 重连
+    // 2. WiFi 重连
+    if (!wifi_connected) {
         static uint32_t last_wifi_retry = 0;
         if (millis() - last_wifi_retry > 30000) {
             last_wifi_retry = millis();
             wifi_connected = connect_wifi();
-            if (wifi_connected) connect_mqtt();
+            if (wifi_connected) replay_spiffs_queue();
         }
     }
     
@@ -327,23 +350,20 @@ void loop() {
     if (millis() - last_hb_check > 60000) {
         last_hb_check = millis();
         for (int i = 0; i < node_count; i++) {
-            if (millis() - node_hb[i].last_seen > 600000) {  // 10分钟无心跳
-                char topic[32];
-                snprintf(topic, 32, "monitor/%d/status", node_hb[i].device_id);
-                mqtt.publish(topic, "{\"type\":\"offline\"}");
+            if (millis() - node_hb[i].last_seen > 600000) {
+                http_post_to_ingest(
+                    "{\"device_id\":" + String(node_hb[i].device_id) + ",\"type\":\"offline\"}");
             }
         }
     }
     
-    // 4. 状态更新
-    if (millis() - last_status > 5000) {
+    // 4. 状态更新 + 网关心跳 (每 60s)
+    if (millis() - last_status > 60000) {
         last_status = millis();
         oled_update();
-        // 定期发网关心跳
-        char gw_json[64];
-        snprintf(gw_json, 64, "{\"gateway_id\":\"%s\",\"nodes\":%d,\"pkts\":%u}",
-                 MQTT_CLIENT, node_count, pkt_count);
-        mqtt.publish("monitor/gateway/status", gw_json);
+        String gw_json = "{\"gateway_id\":\"kiwi-gateway-01\",\"nodes\":" +
+                         String(node_count) + ",\"pkts\":" + String(pkt_count) + "}";
+        http_post_to_ingest(gw_json);
     }
     
     delay(1);

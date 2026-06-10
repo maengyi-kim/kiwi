@@ -8,6 +8,38 @@
 #include "storage.h"
 #include "config.h"
 #include <EEPROM.h>
+#include <string.h>
+
+// ─── 芯片 UID 缓存 ───
+static uint8_t  uid_cache[12];
+static bool     uid_loaded = false;
+
+static void uid_load(void) {
+    if (uid_loaded) return;
+    for (int i = 0; i < 12; i++) {
+        uid_cache[i] = *(volatile uint8_t*)(UID_BASE + i);
+    }
+    uid_loaded = true;
+}
+
+uint16_t get_uid_device_id(void) {
+    uid_load();
+    // device_id = UID 最后2字节
+    return uid_cache[10] | ((uint16_t)uid_cache[11] << 8);
+}
+
+const uint8_t* get_uid_dev_eui(void) {
+    uid_load();
+    // DevEUI = UID[0:5] + UID[10:11]
+    // 后2字节与 device_id 一致，网关可直接从 DevEUI 提取 device_id
+    static uint8_t dev_eui[8];
+    memcpy(dev_eui, uid_cache, 6);        // UID[0..5]
+    dev_eui[6] = uid_cache[10];            // device_id low
+    dev_eui[7] = uid_cache[11];            // device_id high
+    return dev_eui;
+}
+
+// ─── EEPROM 底层 ───
 
 void storage_init(void) {
     // STM32duino 的 EEPROM 库自动模拟

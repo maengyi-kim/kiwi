@@ -183,7 +183,7 @@ void handle_downlink(int rx_len) {
 
 // ─── OTAA 入网 ───
 bool do_join(void) {
-    const uint8_t dev_eui[8] = DEV_EUI;
+    const uint8_t* dev_eui = get_uid_dev_eui();
     uint16_t dev_nonce = (uint16_t)(micros() & 0xFFFF);  // 伪随机
     
     int len = encode_join_request(tx_buf, MAX_FRAME_LEN, dev_eui, dev_nonce);
@@ -271,6 +271,13 @@ void setup() {
     
     boot_time = millis();
     storage_init();
+    
+    // 从芯片UID读取 device_id
+    uint16_t my_id = get_uid_device_id();
+    
+#ifdef KIWI_DEBUG
+    Serial.print("Device ID: "); Serial.println(my_id);
+#endif
     
     // 初始化 LoRa
     if (!lora_init()) {
