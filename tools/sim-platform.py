@@ -349,6 +349,11 @@ class Handler(BaseHTTPRequestHandler):
                     new_gid = int(body["gateway_id"])
                     if new_gid in gateways:
                         node.gateway_id = new_gid
+                if "sensor_type" in body:
+                    st = body["sensor_type"]
+                    if st in SENSOR_PROFILES:
+                        node.sensor_type = st
+                        node.battery = SENSOR_PROFILES[st].get("battery", 3.75)
                 if was_running: node.start()
                 log(f"✏ Node [{nid}] updated")
                 return self._json(node.to_dict())
@@ -530,7 +535,11 @@ th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase}
   <div class="panel-title"><span id="edit-title">✏ 编辑</span></div>
   <div class="form-row">
     <div><label>名称</label><input id="ef-name"></div>
-    <div id="ef-type-group" style="display:none"><label>传感器类型</label><span id="ef-type-text" style="padding:7px 0;font-size:13px"></span></div>
+    <div id="ef-type-group"><label>传感器类型</label><select id="ef-type">
+      <option value="temperature">温度</option><option value="humidity">湿度</option>
+      <option value="water_level">水位</option><option value="switch">开关</option>
+      <option value="status">状态</option><option value="temp_humidity">温湿度一体</option>
+    </select></div>
     <div id="ef-gw-group"><label>绑定网关</label><select id="ef-gw"></select></div>
     <div id="ef-int-group"><label>上报间隔(s)</label><input id="ef-int" type="number" min="1"></div>
     <button class="btn btn-green" onclick="doUpdate()">💾 保存</button>
@@ -591,10 +600,14 @@ function editNode(id) {
   document.getElementById('edit-title').textContent = '✏ 编辑节点 #'+id;
   document.getElementById('ef-name').value = n.name;
   document.getElementById('ef-int').value = n.interval;
+  document.getElementById('ef-type').value = n.sensor_type;
+  document.getElementById('ef-type-group').style.display = 'block';
   document.getElementById('ef-gw-group').style.display = 'block';
   document.getElementById('ef-int-group').style.display = 'block';
-  document.getElementById('ef-type-group').style.display = 'block';
-  document.getElementById('ef-type-text').textContent = n.sensor_type;
+  // Populate gateway dropdown
+  const gwSel = document.getElementById('ef-gw');
+  const gws = Object.values(window._gwData || {});
+  gwSel.innerHTML = gws.map(g => `<option value="${g.id}" ${g.id===n.gateway_id?'selected':''}>[${g.id}] ${g.name}</option>`).join('');
   document.getElementById('edit-panel').style.display = 'block';
 }
 
@@ -606,6 +619,7 @@ function doUpdate() {
   if (type === 'node') {
     body.interval = parseInt(document.getElementById('ef-int').value) || 10;
     body.gateway_id = parseInt(document.getElementById('ef-gw').value);
+    body.sensor_type = document.getElementById('ef-type').value;
   }
   api(`api/${type}/${id}/update`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   document.getElementById('edit-panel').style.display = 'none';
